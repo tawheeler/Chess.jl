@@ -1,6 +1,7 @@
 using Cairo
 using Colors
 using Vec
+using Base.Test
 
 include("rendermodels.jl")
 
@@ -9,7 +10,7 @@ struct Coordinate
     j::Int
 end
 Base.getindex(arr::Matrix, loc::Coordinate) = arr[loc.i, loc.j]
-Base.setindex(arr::Matrix, loc::Coordinate, val) = arr[loc.i, loc.j] = val
+Base.setindex!(arr::Matrix, val, loc::Coordinate) = arr[loc.i, loc.j] = val
 shift(loc::Coordinate, Δi::Int, Δj::Int) = Coordinate(loc.i + Δi, loc.j + Δj)
 
 struct Piece
@@ -22,8 +23,10 @@ const EMPTY_SQUARE = Piece('_', true)
 mutable struct MailboxBoard
     pieces::Matrix{Piece}
     white_to_move::Bool
-    white_could_castle::Bool # whether white is principally able to castle king- or queen side, now or later during the king
-    black_could_castle::Bool # whether the involved pieces have not already been moved or in the case of rooks, were captured
+    white_could_castle_kingside::Bool # whether white is principally able to castle king- or queen side, now or later during the king
+    white_could_castle_queenside::Bool # whether the involved pieces have not already been moved or in the case of rooks, were captured
+    black_could_castle_kingside::Bool
+    black_could_castle_queenside::Bool
     en_passant_target_square::Coordinate
     reversible_move_count::Int # number of reversible moves to keep track for the fifty-move rule
 end
@@ -57,6 +60,8 @@ function MailboxBoard()
                         true,
                         true,
                         true,
+                        true,
+                        true,
                         Coordinate(0,0),
                         0,
                         )
@@ -65,13 +70,144 @@ end
 function Base.copy!(dst::MailboxBoard, src::MailboxBoard)
     copy!(dst.pieces, src.pieces)
     dst.white_to_move = src.white_to_move
-    dst.white_could_castle = src.white_could_castle
-    dst.black_could_castle = src.black_could_castle
+    dst.white_could_castle_kingside = src.white_could_castle_kingside
+    dst.white_could_castle_queenside = src.white_could_castle_queenside
+    dst.black_could_castle_kingside = src.black_could_castle_kingside
+    dst.black_could_castle_queenside = src.black_could_castle_queenside
     dst.en_passant_target_square = src.en_passant_target_square
     dst.reversible_move_count = src.reversible_move_count
     return dst
 end
-Base.copy(src::MailboxBoard) = copy!(MailboxBoard(Matrix{Piece}(8,8), true, true, true, Coordinate(0,0), 0)
+Base.copy(src::MailboxBoard) = copy!(MailboxBoard(Matrix{Piece}(8,8), true, true, true, true, true, Coordinate(0,0), 0), src)
+
+function Base.hash(board::MailboxBoard, h::UInt64=zero(UInt64))
+    return hash(board.pieces,
+            hash(board.white_to_move,
+                hash(board.white_could_castle_kingside,
+                    hash(board.white_could_castle_queenside,
+                        hash(board.black_could_castle_kingside,
+                            hash(board.black_could_castle_queenside,
+                                hash(board.en_passant_target_square,
+                                    hash(board.reversible_move_count, h))))))))
+end
+
+"""
+The board notation starts at a1 and lists each row.
+White pieces are lowercase and black pieces are uppercase.
+A digit indicates the number of empty spaces to skip.
+This is followed by some stuff that may indicate who moves (w/b), castling rights for king and queenside (KQkq), and two digits whose meaning I don't know
+
+ex: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
+ex: "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10"
+ex: "r3k2r/p1ppqb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -
+"""
+function to_board_notation(board::MailboxBoard)
+    retval = ""
+    for j in 1 : 8
+        digit_count = 0
+        for i in 1 : 8
+            if board.pieces[i,j].char == '_'
+                digit_count += 1
+            else
+                if digit_count > 0
+                    retval *= string(digit_count)
+                    digit_count = 0
+                end
+                piece = board.pieces[i,j]
+                retval *= piece.white ? lowercase(piece.char) : uppercase(piece.char)
+            end
+        end
+
+        if digit_count > 0
+            retval *= string(digit_count)
+        end
+        if j < 8
+            retval *= "/"
+        end
+    end
+    retval *= " " * (board.white_to_move ? "w" : "b")
+
+    castle_string = " "
+    if board.white_could_castle_kingside; castle_string *= "K"; end
+    if board.white_could_castle_queenside; castle_string *= "Q"; end
+    if board.black_could_castle_kingside; castle_string *= "k"; end
+    if board.black_could_castle_queenside; castle_string *= "q"; end
+    retval *= (castle_string == " " ? " -" : castle_string)
+    retval *= " - 0 1" # not sure what to put here (file of en passant pawn and reversible move count?)
+    return retval
+end
+const STARTING_BOARD = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+@test to_board_notation(MailboxBoard()) == STARTING_BOARD
+
+Piece(char::Char) = Piece(uppercase(char), char > 'Z')
+
+function MailboxBoard(board_notation::String)
+    pieces = Array{Piece}(8, 8)
+    i, j, k = 1, 1, 1
+    while 8(j-1) + (i-1) < 64
+        c = board_notation[k]
+        if '1' ≤ c ≤ '8'
+            while c > '0'
+                pieces[i,j] = EMPTY_SQUARE
+                i += 1
+                c -= 1
+            end
+        else
+            pieces[i,j] = Piece(c)
+            i += 1
+        end
+
+        k += 1
+        if i > 8
+            j += 1
+            i = 1
+            @assert board_notation[k] == '/' || (j == 9 && board_notation[k] == ' ')
+            k += 1 # skip over '/' or ' '
+        end
+    end
+
+    white_to_move = board_notation[k] == 'w'
+    k += 2
+    white_could_castle_kingside = false
+    white_could_castle_queenside = false
+    black_could_castle_kingside = false
+    black_could_castle_queenside = false
+
+    if board_notation[k] == 'K'
+        white_could_castle_kingside = true
+        k += 1
+    end
+    if board_notation[k] == 'Q'
+        white_could_castle_queenside = true
+        k += 1
+    end
+    if board_notation[k] == 'k'
+        black_could_castle_kingside = true
+        k += 1
+    end
+    if board_notation[k] == 'q'
+        black_could_castle_queenside = true
+        k += 1
+    end
+    if board_notation[k] == '-'
+        k += 1
+    end
+    k += 1
+
+    en_passant_target_square = Coordinate(0,0)
+    reversible_move_count = 0
+
+    return MailboxBoard(pieces,
+                        white_to_move,
+                        white_could_castle_kingside,
+                        white_could_castle_queenside,
+                        black_could_castle_kingside,
+                        black_could_castle_queenside,
+                        en_passant_target_square,
+                        reversible_move_count,
+                        )
+end
+@test to_board_notation(MailboxBoard(STARTING_BOARD)) == STARTING_BOARD
 
 const CANVAS_WIDTH = 300
 const CANVAS_HEIGHT = CANVAS_WIDTH
@@ -153,8 +289,8 @@ inbounds(i::Int) = 1 ≤ i ≤ 8
 inbounds(loc::Coordinate) = inbounds(loc.i) && inbounds(loc.j)
 
 isopen(board::MailboxBoard, loc::Coordinate) = board.pieces[loc].char == '_'
-ismycolor(board::MailboxBoard, loc::Coordinate, mycolor::Bool) = board.pieces[loc].white == mycolor
-isothercolor(board::MailboxBoard, loc::Coordinate, mycolor::Bool) = board.pieces[loc].white != mycolor
+ismycolor(board::MailboxBoard, loc::Coordinate, mycolor::Bool) = board.pieces[loc].char != '_' && board.pieces[loc].white == mycolor
+isothercolor(board::MailboxBoard, loc::Coordinate, mycolor::Bool) = board.pieces[loc].char != '_' && board.pieces[loc].white != mycolor
 inbounds_and_open_or_other_color(board::MailboxBoard, loc::Coordinate, mycolor::Bool) = inbounds(loc) && (isopen(board, loc) || isothercolor(board, loc, mycolor))
 
 """
@@ -177,13 +313,14 @@ function get_pseudo_legal_moves_bishop(board::MailboxBoard, loc::Coordinate, whi
     coordinates = Coordinate[]
 	for dx in (-1,1)
 		for dy in (-1,1)
-			Δx = dx
-			Δy = dy
-			while inbounds_and_open_or_other_color(board, shift(loc, Δx, Δy), white)
-				push!(coordinates, shift(loc, Δx, Δy))
-				Δx += dx
-				Δy += dy
-			end
+            dst = shift(loc, dx, dy)
+            while inbounds_and_open_or_other_color(board, dst, white)
+                push!(coordinates, dst)
+                if !isopen(board, dst) && isothercolor(board, dst, white)
+                    break
+                end
+                dst = shift(dst, dx, dy)
+            end
 		end
 	end
 	return coordinates
@@ -191,15 +328,16 @@ end
 function get_pseudo_legal_moves_rook(board::MailboxBoard, loc::Coordinate, white::Bool)
     coordinates = Coordinate[]
 	for (dx,dy) in [(-1,0), (0,-1), (1,0), (0,1)]
-		Δx = dx
-		Δy = dy
-		while inbounds_and_open_or_other_color(board, shift(loc, Δx, Δy), white)
-			push!(coordinates, shift(loc, Δx, Δy))
-			Δx += dx
-			Δy += dy
-		end
+		dst = shift(loc, dx, dy)
+        while inbounds_and_open_or_other_color(board, dst, white)
+            push!(coordinates, dst)
+            if !isopen(board, dst) && isothercolor(board, dst, white)
+                break
+            end
+            dst = shift(dst, dx, dy)
+        end
 	end
-	return pieces
+	return coordinates
 end
 function get_pseudo_legal_moves_queen(board::MailboxBoard, loc::Coordinate, white::Bool)
 	append!(
@@ -211,13 +349,13 @@ function get_pseudo_legal_moves_king(board::MailboxBoard, loc::Coordinate, white
 	i,j = loc.i, loc.j
     return filter!(p -> inbounds_and_open_or_other_color(board, p, white), [
 	    Coordinate(i+1,j+1),
-	    Coordinate(i+1,j-1),
+	    Coordinate(i+0,j+1),
 	    Coordinate(i-1,j+1),
+	    Coordinate(i-1,j+0),
 	    Coordinate(i-1,j-1),
-	    Coordinate(i+1,j+1),
-	    Coordinate(i-1,j+1),
+	    Coordinate(i+0,j-1),
 	    Coordinate(i+1,j-1),
-	    Coordinate(i-1,j-1),
+	    Coordinate(i+1,j+0),
 	])
 end
 function get_pseudo_legal_moves_pawn(board::MailboxBoard, loc::Coordinate, white::Bool)
@@ -232,11 +370,14 @@ function get_pseudo_legal_moves_pawn(board::MailboxBoard, loc::Coordinate, white
 		end
 	end
 	for dx in (-1,1)
-        newloc = shift(loc, dx, dy)
-		if (loc.j == (white ? 2 : 7)) && inbounds(newloc) && isothercolor(board, newloc, white)
-			push!(coordinates, newloc)
+        loc_capture = shift(loc, dx, dy)
+		if inbounds(loc_capture) && isothercolor(board, loc_capture, white)
+			push!(coordinates, loc_capture)
 		end
 	end
+
+    # TODO: en passant
+
 	return coordinates
 end
 function get_pseudo_legal_moves(board::MailboxBoard, loc::Coordinate)
@@ -254,7 +395,7 @@ function get_pseudo_legal_moves(board::MailboxBoard, loc::Coordinate)
 	elseif piece.char == 'P'
 		return get_pseudo_legal_moves_pawn(board, loc, piece.white)
 	else
-		return Tuple{Int,Int}[]
+		return Coordinate[]
 	end
 end
 
@@ -274,7 +415,7 @@ struct Move
     dst::Coordinate # target coordinate
     promotion::Char # what a promoted pawn becomes
 end
-Move(src::Coordinate, dst::Coordinate) = Move(src, dst, '')
+Move(src::Coordinate, dst::Coordinate) = Move(src, dst, '_')
 
 """
 reversible moves increment the clock for use with the fifty-move rule.
@@ -282,30 +423,107 @@ All moves by non-pawns to empty target squares.
 """
 is_reversible(board::MailboxBoard, move::Move) = board.pieces[move.src].char != 'P' && board.pieces[move.dst].char == '_'
 
-function make_move(board::MailboxBoard, move::Move)
-    retval = copy(board) # NOTE: this allocates memory
+function make_move!(board::MailboxBoard, move::Move)
     if board.pieces[move.src].char == 'P'
         # pawn
-    elseif board.pieces[move.src].char == 'K' && abs(a.i - b.i) > 1
+
+        # promotion
+        if move.src.j == 1 || move.src.j == 8 # reached the end
+            board.pieces[move.dst] = Piece(move.promotion, board.pieces[move.src].white)
+            board.pieces[move.src] = EMPTY_SQUARE
+        elseif move.dst.i != move.dst.i
+            # en passant
+            board.pieces[move.dst] = board.pieces[move.src]
+            board.pieces[move.src] = EMPTY_SQUARE
+            board.pieces[move.src.i, move.dst.j] = EMPTY_SQUARE # capture!
+        else
+            # normal
+            board.pieces[move.dst] = board.pieces[move.src]
+            board.pieces[move.src] = EMPTY_SQUARE
+        end
+    elseif board.pieces[move.src].char == 'K' && abs(move.src.i - move.dst.i) > 1
         # castle
-        
+        board.pieces[move.dst] = board.pieces[move.src]
+        board.pieces[move.src] = EMPTY_SQUARE
+
+        rook_dst = Coordinate(move.dst.i - div(move.dst.i - move.src.i,2), move.dst.j)
+        rook_src = Coordinate(move.dst.i < 4 ? 1 : 8, move.dst.j)
+        board.pieces[rook_dst] = board.pieces[rook_src]
+        board.pieces[rook_src] = EMPTY_SQUARE
     else
-        board[move.dst] = board[move.src]
-        board[move.src] = EMPTY_SQUARE
+        board.pieces[move.dst] = board.pieces[move.src]
+        board.pieces[move.src] = EMPTY_SQUARE
     end
+
+    board.white_to_move = !board.white_to_move
     return board
 end
+function make_move(board::MailboxBoard, move::Move)
+    retval = copy(board) # NOTE: this allocates memory
+    make_move!(retval, move)
+end
 
-# function get_unconstrained_check_map(board::MailboxBoard, mycolor::Bool)
-# 	checkmap = falses(8,8)
-# 	for i in 1 : 8
-# 		for j in 1 : 8
-# 			if ismycolor(board, i, j, mycolor)
-# 				for loc in get_pseudo_legal_moves(board, i, j)
-# 					checkmap[loc...] = true
-# 				end
-# 			end
-# 		end
-# 	end
-# 	return checkmap
-# end
+"""
+Is the given location within range of a pseudo legal move?
+"""
+function is_location_in_check(board::MailboxBoard, loc::Coordinate, mycolor::Bool)
+    for i in 1 : 8
+        for j in 1 : 8
+            src = Coordinate(i,j)
+            if !ismycolor(board, src, mycolor)
+                for dst in get_pseudo_legal_moves(board, src)
+                    if dst == loc
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+function get_king_location(board::MailboxBoard, white::Bool)
+    for i in 1 : 8
+        for j in 1 : 8
+            loc = Coordinate(i,j)
+            if board.pieces[loc].char == 'K' && board.pieces[loc].white == white
+                return loc
+            end
+        end
+    end
+    error("Invalid Codepath")
+end
+
+function get_legal_moves(board::MailboxBoard)
+    moves = Move[]
+    for i in 1 : 8
+        for j in 1 : 8
+            src = Coordinate(i,j)
+            if ismycolor(board, src, board.white_to_move)
+                pl_moves = [Move(src,dst) for dst in get_pseudo_legal_moves(board, src)]
+                filter!(move -> begin
+                            board2 = make_move(board, Move(move))
+                            my_king_loc = get_king_location(board2, board.white_to_move)
+                            !is_location_in_check(board2, my_king_loc, board.white_to_move)
+                        end, pl_moves)
+                append!(moves, pl_moves)
+            end
+        end
+    end
+    return moves
+end
+
+function get_reachable_boards_with_one_more_move(boards::Set{MailboxBoard})
+    retval = Set{MailboxBoard}()
+    for board in boards
+        for move in get_legal_moves(board)
+            push!(retval, make_move(board, move))
+        end
+    end
+    return retval
+end
+function get_reachable_boards_with_one_more_move(board::MailboxBoard)
+    boards = Set{MailboxBoard}()
+    push!(boards, board)
+    return get_reachable_boards_with_one_more_move(boards)
+end
