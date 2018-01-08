@@ -212,11 +212,12 @@ end
 const CANVAS_WIDTH = 300
 const CANVAS_HEIGHT = CANVAS_WIDTH
 
-const TILE_WIDTH = CANVAS_WIDTH/8
+const TILE_WIDTH = CANVAS_WIDTH/10 # for 1-tile width margins on each side
 const PIECE_RADIUS = TILE_WIDTH*0.3
 const PIECE_FONT_SIZE = 15
 const LOCATION_RADIUS = TILE_WIDTH*0.45
 
+const COLOR_BACKGROUND = colorant"white"
 const COLOR_TILE_LIGHT = colorant"blue"
 const COLOR_TILE_DARK = colorant"black"
 
@@ -225,14 +226,24 @@ const COLOR_PIECE_DARK = colorant"green"
 const COLOR_HIGHLIGHT = RGBA(1.0,1.0,1.0,0.6)
 const COLOR_TEXT = colorant"white"
 
+i2x(i::Integer) = TILE_WIDTH*(i-0.5)
+
 function render_tiles!(rendermodel::RenderModel)
 	for i in 1 : 8
 	    for j in 1 : 8
-	        add_instruction!(rendermodel, render_rect, (VecE2(TILE_WIDTH*(i - 0.5), TILE_WIDTH*(j - 0.5)),
-	        											TILE_WIDTH, TILE_WIDTH,
+	        add_instruction!(rendermodel, render_rect, (VecE2(i2x(i), i2x(j)), TILE_WIDTH, TILE_WIDTH,
 	        											mod(i + j, 2) == 1 ? COLOR_TILE_LIGHT : COLOR_TILE_DARK))
 	    end
 	end
+
+    # render lower labels
+    for i in 1 : 8
+        add_instruction!(rendermodel, render_text, (string('a' + i - 1), i2x(i), i2x(0), PIECE_FONT_SIZE, colorant"black", true))
+    end
+    for j in 1 : 8
+        add_instruction!(rendermodel, render_text, (string(j), i2x(0), i2x(j), PIECE_FONT_SIZE, colorant"black", true))
+    end
+
 	return rendermodel
 end
 function render_pieces!(rendermodel::RenderModel, pieces::Matrix{Piece})
@@ -240,8 +251,8 @@ function render_pieces!(rendermodel::RenderModel, pieces::Matrix{Piece})
 	    for j in 1 : 8
 	        piece = pieces[i,j]
 	        if piece.char != '_'
-	            x = TILE_WIDTH*(i - 0.5)
-	            y = TILE_WIDTH*(j - 0.5)
+	            x = i2x(i)
+	            y = i2x(j)
 	            add_instruction!(rendermodel, render_circle, (VecE2(x, y), PIECE_RADIUS, piece.white ? COLOR_PIECE_LIGHT : COLOR_PIECE_DARK))
 	            add_instruction!(rendermodel, render_text, (string(piece.char), x, y, PIECE_FONT_SIZE, COLOR_TEXT, true))
 	        end
@@ -251,16 +262,16 @@ function render_pieces!(rendermodel::RenderModel, pieces::Matrix{Piece})
 end
 
 function render_highlight!(rendermodel::RenderModel, i::Int, j::Int)
-	x = TILE_WIDTH*(i - 0.5)
-	y = TILE_WIDTH*(j - 0.5)
+	x = i2x(i)
+    y = i2x(j)
 	add_instruction!(rendermodel, render_circle, (VecE2(x, y), PIECE_RADIUS, COLOR_HIGHLIGHT))
 	return rendermodel
 end
 render_highlight!(rendermodel::RenderModel, pos::Coordinate) = render_highlight!(rendermodel, pos.i, pos.j)
 function render_locations!(rendermodel::RenderModel, locations::Vector{Coordinate})
 	for loc in locations
-		x = TILE_WIDTH*(loc.i - 0.5)
-		y = TILE_WIDTH*(loc.j - 0.5)
+		x = i2x(loc.i)
+        y = i2x(loc.j)
 		add_instruction!(rendermodel, render_circle, (VecE2(x, y), LOCATION_RADIUS, COLOR_HIGHLIGHT))
 	end
 	return rendermodel
@@ -272,6 +283,7 @@ function render_board(board::MailboxBoard, locations::Vector{Coordinate}=Coordin
     ctx = creategc(s)
 
     clear_setup!(rendermodel)
+    set_background_color!(rendermodel, COLOR_BACKGROUND)
     render_tiles!(rendermodel)
     render_pieces!(rendermodel, board.pieces)
     render_locations!(rendermodel, locations)
@@ -494,19 +506,23 @@ function get_king_location(board::MailboxBoard, white::Bool)
     error("Invalid Codepath")
 end
 
+function get_legal_moves(board::MailboxBoard, src::Coordinate)
+    @assert ismycolor(board, src, board.white_to_move)
+    moves = [Move(src,dst) for dst in get_pseudo_legal_moves(board, src)]
+    filter!(move -> begin
+                board2 = make_move(board, Move(move))
+                my_king_loc = get_king_location(board2, board.white_to_move)
+                !is_location_in_check(board2, my_king_loc, board.white_to_move)
+            end, moves)
+    return moves
+end
 function get_legal_moves(board::MailboxBoard)
     moves = Move[]
     for i in 1 : 8
         for j in 1 : 8
             src = Coordinate(i,j)
             if ismycolor(board, src, board.white_to_move)
-                pl_moves = [Move(src,dst) for dst in get_pseudo_legal_moves(board, src)]
-                filter!(move -> begin
-                            board2 = make_move(board, Move(move))
-                            my_king_loc = get_king_location(board2, board.white_to_move)
-                            !is_location_in_check(board2, my_king_loc, board.white_to_move)
-                        end, pl_moves)
-                append!(moves, pl_moves)
+                append!(moves, get_legal_moves(board, src))
             end
         end
     end
@@ -515,6 +531,7 @@ end
 
 function get_reachable_boards_with_one_more_move(boards::Set{MailboxBoard})
     retval = Set{MailboxBoard}()
+    # retval = Vector{MailboxBoard}()
     for board in boards
         for move in get_legal_moves(board)
             push!(retval, make_move(board, move))
@@ -524,6 +541,7 @@ function get_reachable_boards_with_one_more_move(boards::Set{MailboxBoard})
 end
 function get_reachable_boards_with_one_more_move(board::MailboxBoard)
     boards = Set{MailboxBoard}()
+    # boards = Vector{MailboxBoard}()
     push!(boards, board)
     return get_reachable_boards_with_one_more_move(boards)
 end
